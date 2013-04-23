@@ -47,6 +47,8 @@ def main():
       help="Filter end time (default: end)")
   parser.add_argument("-n", "--interval", default=86400, type=int,
       help="Filter time interval in seconds (default:86400 -- 1 day)")
+  parser.add_argument("-m", "--max_offline", default=None,
+      help="Output a file contain each memberss max offline time")
   parser.add_argument("-f", "--filter", default=None,
       help="Filter type: interval, time_range, online_time")
   args = parser.parse_args()
@@ -64,8 +66,19 @@ def main():
       clients.sort(key=lambda client: client.online_time)
     elif args.sort == "messages":
       clients.sort(key=lambda client: len(client.msg_times))
-    for client in clients:
-      print client
+
+    if args.max_offline:
+      times = []
+      for client in clients:
+        times.append(client.max_offline_time)
+      times.sort()
+      f = open(args.max_offline, "w+")
+      for t in times:
+        f.write("%s\n" % (t / data_analyzer.end))
+      f.close()
+    else:
+      for client in clients:
+        print client
     return
 
   to_remove = []
@@ -117,6 +130,7 @@ class DataAnalyzer:
       self.online_times = []
       self.online_time = 0
       self.intervals = 0
+      self.max_offline_time = 0
 
     def set_online(self, ctime):
       """ Set the client as online """
@@ -131,6 +145,12 @@ class DataAnalyzer:
       """ Sets a final offline if necessary """
       if self.online_times[-1][1] == 0:
         self.set_offline(ctime)
+      now = 0
+      # Create a loop, really for users who show up just once...
+      self.max_offline_time = ctime - self.online_times[-1][1] + self.online_times[0][0]
+      for times in self.online_times:
+        self.max_offline_time = max(self.max_offline_time, times[0] - now)
+        now = times[1]
 
     def set_msg(self, ctime):
       self.msg_times.append(ctime)
@@ -139,10 +159,10 @@ class DataAnalyzer:
       return self.__str__()
 
     def __str__(self):
-      return "uid: %s, online time: %s, intervals: %s, msgs: %s" % \
-          (self.uid, self.online_time, self.intervals, len(self.msg_times))
+      return "uid: %s, online time: %s, max offline time: %s, online times: %s, intervals: %s, msgs: %s" % \
+          (self.uid, self.online_time, self.max_offline_time, len(self.online_times), self.intervals, len(self.msg_times))
 
-  def __init__(self, events, interval, end):
+  def __init__(self, events, interval = 0, end = -1):
     self.event_actions = {
         "join" : self.on_join,
         "quit" : self.on_quit,
@@ -152,7 +172,7 @@ class DataAnalyzer:
     self.clients = {}
 
     if end == -1:
-      self.end = events[-1][0] + 1
+      self.end = events[-1][0]
     else:
       self.end = end
 
@@ -160,16 +180,20 @@ class DataAnalyzer:
 
     if interval > 0:
       for client in self.clients.values():
-        ctime = 0
-        ntime = interval
+        ctime = -1
         for online_times in client.online_times:
-          while ntime < online_times[0]:
-            ctime = ntime
-            ntime += interval
-          while online_times[0] <= ntime and ctime < online_times[1]:
-            client.intervals += 1
-            ctime = ntime
-            ntime += interval
+          # Add all the rounds the client was online for (at least one)
+          count = int(math.ceil(online_times[1] / interval) - \
+              math.floor(online_times[0] / interval))
+          client.intervals += count
+
+          # Subtract one if it overlaps with the previous online time
+          start_idx = math.floor(ctime / interval)
+          next_idx = math.floor(online_times[0] / interval)
+          if start_idx == next_idx:
+            client.intervals -= 1
+
+          ctime = online_times[1]
 
   def process_events(self, events):
     for event in events:
