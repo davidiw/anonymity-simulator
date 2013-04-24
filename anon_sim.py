@@ -18,6 +18,7 @@ import logging
 import math
 import pickle
 import random
+from data_analyzer import DataAnalyzer
 
 class DefaultParse:
   def __init__(self, filename, end):
@@ -66,7 +67,9 @@ def main():
       help="specifies the end time for evaluation (default: all / -1)")
   parser.add_argument("-t", "--trainer", default=None,
       help="specifies a trainer for the anonymity data for static splitting "
-      "groups: join, rank, or random (default: None)")
+      "groups: join, rank, offline, or random (default: None)")
+  parser.add_argument("--deity", default=False, action="store_const",
+      dest="deity", const=True, help="Enable deity")
   parser.add_argument("-x", "--policy", default="min_anon",
       help="specifies the policy for the simulator: "
       "min_anon, split (default: min_anon)")
@@ -102,7 +105,8 @@ def main():
         round_time_span = args.round_time_span,
         start_time = args.start,
         trainer = args.trainer,
-        split_size = args.split_size)
+        split_size = args.split_size,
+        deity = args.deity)
 
   anon_sim.run()
 
@@ -114,7 +118,7 @@ def main():
   print "Delivered messages: %s" % (anon_sim.on_time, )
   print "Delayed messages: %s" % (len(anon_sim.delayed_times), )
   print "Lost messages: %s" % (len(anon_sim.lost_messages), )
-  print "Delays: %s" % (anon_sim.delayed_times)
+#  print "Delays: %s" % (anon_sim.delayed_times)
 
   to_print = []
   for client in anon_sim.clients:
@@ -488,6 +492,28 @@ class DynamicSplitting(AnonymitySimulator):
     self.split_size = split_size
     self.member_online = {}
 
+    if trainer == "rank":
+      self.sorter = self.rank_trainer
+    elif trainer == "join":
+      self.sorter = self.join_trainer
+    elif self.trainer == "offline":
+      self.sorter = self.join_trainer
+    else:
+      self.sorter = self.random_trainer()
+
+  def max_offline_trainer(self):
+    self.data_clients.sort(key=lambda client: client.max_offline_time)
+
+  def rank_trainer(self, clients, etime):
+    clients.sort(key=lambda client: client.get_online_time(self.start_time))
+
+  def join_trainer(self, clients, etime):
+    clients.sort(key=lambda client: client.get_online_time(etime))
+
+  def random_trainer(self, clients, etime):
+    rand = random.Random()
+    rand.shuffle(clients)
+
   def run(self):
     for client in self.clients:
       self.member_online[client.uid] = client.get_online()
@@ -546,7 +572,7 @@ class DynamicSplitting(AnonymitySimulator):
               client.uid not in self.join_queue:
             clients.append(client)
 
-        clients.sort(key=lambda client: client.get_online_time(etime))
+        self.sorter(clients, etime)
 
         group_idx = len(self.split_group)
         self.splits[uid] = group_idx
@@ -618,7 +644,10 @@ class StaticSplitting(DynamicSplitting):
   def __init__(self, total, events, min_anon = 0,
       pseudonyms_per_client = 1, round_time_span = 2.0,
       start_time = 0, trainer = None,
-      split_size = 1):
+      split_size = 1, deity = False):
+
+    data_analyzer = DataAnalyzer(list(events), round_time_span, -1 if deity else start_time)
+    self.data_clients = data_analyzer.clients.values()
 
     DynamicSplitting.__init__(self, total, events, min_anon,
         pseudonyms_per_client, round_time_span,
@@ -631,8 +660,18 @@ class StaticSplitting(DynamicSplitting):
       splitting_order = self.rank_trainer()
     elif self.trainer == "join":
       splitting_order = self.join_trainer()
+    elif self.trainer == "offline":
+      splitting_order = self.max_offline_trainer()
     else:
       splitting_order = self.random_trainer()
+
+    delta = len(self.clients) - len(self.data_clients)
+    assert(delta >= 0)
+    if delta > 0:
+      for idx in range(len(self.data_clients), len(self.clients)):
+        splitting_order.append(idx)
+
+    self.data_clients = None
 
     groups = len(splitting_order) / self.split_size
     remaining = len(splitting_order) % self.split_size
@@ -661,14 +700,29 @@ class StaticSplitting(DynamicSplitting):
           group = []
           online = True
 
+    for gidx in range(len(self.group_online)):
+      if self.group_online[gidx]:
+        for cidx in self.split_group[gidx]:
+          self.member_online[cidx] = True
+      else:
+        for cidx in self.split_group[gidx]:
+          self.member_online[cidx] = False
+
     AnonymitySimulator.run(self)
 
-  def rank_trainer(self):
-    clients = list(self.clients)
-    clients.sort(key=lambda client: client.get_online_time(self.start_time))
+  def max_offline_trainer(self):
+    self.data_clients.sort(key=lambda client: client.max_offline_time)
 
     splitting_order = []
-    for client in clients:
+    for client in self.data_clients:
+      splitting_order.append(client.uid)
+    return splitting_order
+
+  def rank_trainer(self):
+    self.data_clients.sort(key=lambda client: client.get_online_time(self.start_time))
+
+    splitting_order = []
+    for client in self.data_clients:
       splitting_order.append(client.uid)
     return splitting_order
 
